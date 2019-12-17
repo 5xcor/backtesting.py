@@ -6,6 +6,10 @@ from functools import partial
 import numpy as np
 import pandas as pd
 
+from bokeh.colors.named import (
+    lime as BULL_COLOR,
+    tomato as BEAR_COLOR
+)
 from bokeh.plotting import figure as _figure
 from bokeh.models import (
     CustomJS,
@@ -59,7 +63,13 @@ def colorgen():
     yield from cycle(Category10[10])
 
 
-def plot(*, results, df, indicators, filename='', plot_width=1200,
+def lightness(color, lightness=.94):
+    color = color.to_hsl()
+    color.l = lightness  # noqa
+    return color.to_rgb()
+
+
+def plot(*, results, df, indicators, filename='', plot_width=None,
          plot_equity=True, plot_pl=True,
          plot_volume=True, plot_drawdown=False,
          smooth_equity=False, relative_equity=True, omit_missing=True,
@@ -73,8 +83,7 @@ def plot(*, results, df, indicators, filename='', plot_width=1200,
     # TestPlot.test_file_size() test was failing).
     _bokeh_reset(filename)
 
-    COLORS = ['tomato', 'lime']
-    COLORS_LIGHT = ['#ffe3e3', '#e3ffe3']
+    COLORS = [BEAR_COLOR, BULL_COLOR]
 
     orig_trade_data = trade_data = results._trade_data.copy(False)
 
@@ -134,6 +143,9 @@ def plot(*, results, df, indicators, filename='', plot_width=1200,
 
     inc_cmap = factor_cmap('inc', COLORS, ['0', '1'])
     cmap = factor_cmap('returns_pos', COLORS, ['0', '1'])
+    colors_darker = [lightness(BEAR_COLOR, .35),
+                     lightness(BULL_COLOR, .35)]
+    trades_cmap = factor_cmap('returns_pos', colors_darker, ['0', '1'])
 
     if is_datetime_index and omit_missing:
         fig_ohlc.xaxis.formatter = FuncTickFormatter(
@@ -368,8 +380,10 @@ return this.labels[index] || "";
         df2.index.name = None
         source2 = ColumnDataSource(df2)
         fig_ohlc.segment('index', 'High', 'index', 'Low', source=source2, color='#bbbbbb')
+        colors_lighter = [lightness(BEAR_COLOR, .92),
+                          lightness(BULL_COLOR, .92)]
         fig_ohlc.vbar('index', width2, 'Open', 'Close', source=source2, line_color=None,
-                      fill_color=factor_cmap('inc', COLORS_LIGHT, ['0', '1']))
+                      fill_color=factor_cmap('inc', colors_lighter, ['0', '1']))
 
     def _plot_ohlc():
         """Main OHLC bars"""
@@ -378,8 +392,8 @@ return this.labels[index] || "";
                           line_color="black", fill_color=inc_cmap)
         return r
 
-    def _plot_ohlc_orders():
-        """Order entry / exit markers on OHLC plot"""
+    def _plot_ohlc_trades():
+        """Trade entry / exit markers on OHLC plot"""
         exit_price = trade_data['Exit Price'].dropna()
         entry_price = trade_data['Entry Price'].dropna().iloc[:exit_price.size]  # entry can be one more at the end  # noqa: E501
         trade_source.add(np.column_stack((entry_price.index, exit_price.index)).tolist(),
@@ -387,7 +401,7 @@ return this.labels[index] || "";
         trade_source.add(np.column_stack((entry_price, exit_price)).tolist(),
                          'position_lines_ys')
         fig_ohlc.multi_line(xs='position_lines_xs', ys='position_lines_ys',
-                            source=trade_source, line_color=cmap,
+                            source=trade_source, line_color=trades_cmap,
                             legend='Trades',
                             line_width=8, line_alpha=1, line_dash='dotted')
 
@@ -501,7 +515,7 @@ return this.labels[index] || "";
         _plot_superimposed_ohlc()
 
     ohlc_bars = _plot_ohlc()
-    _plot_ohlc_orders()
+    _plot_ohlc_trades()
     _plot_indicators()
 
     set_tooltips(fig_ohlc, ohlc_tooltips, vline=True, renderers=[ohlc_bars])
@@ -536,13 +550,17 @@ return this.labels[index] || "";
         wheelzoom_tool = next(wz for wz in f.tools if isinstance(wz, WheelZoomTool))
         wheelzoom_tool.maintain_focus = False
 
+    kwargs = {}
+    if plot_width is None:
+        kwargs['sizing_mode'] = 'stretch_width'
+
     fig = gridplot(
         plots,
         ncols=1,
         toolbar_location='right',
-        # sizing_mode='stretch_width',
         toolbar_options=dict(logo=None),
         merge_tools=True,
+        **kwargs
     )
     show(fig, browser=None if open_browser else 'none')
     return fig

@@ -5,6 +5,13 @@ import numpy as np
 import pandas as pd
 
 
+def try_(lazy_func, default=None, exception=Exception):
+    try:
+        return lazy_func()
+    except exception:
+        return default
+
+
 def _as_str(value):
     if isinstance(value, (Number, str)):
         return str(value)
@@ -26,7 +33,11 @@ def _as_list(value):
 
 def _data_period(df):
     """Return data index period as pd.Timedelta"""
-    return df.index[:100].to_series().diff().median()
+    if df.index.is_all_dates:
+        values = df.index[:100].to_series(keep_tz=True)
+    else:
+        values = df.index[:100].to_series()
+    return values.diff().median()
 
 
 class _Array(np.ndarray):

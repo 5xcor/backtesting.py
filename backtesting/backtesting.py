@@ -5,6 +5,7 @@ module directly, e.g.
 
     from backtesting import Backtest, Strategy
 """
+import multiprocessing as mp
 import os
 import re
 import sys
@@ -87,7 +88,7 @@ class Strategy(metaclass=ABCMeta):
         `backtesting.backtesting.Strategy.data` is.
         Returns `np.ndarray` of indicator values.
 
-        `func` is a function that returns the indicator array of
+        `func` is a function that returns the indicator array(s) of
         same length as `backtesting.backtesting.Strategy.data`.
 
         In the plot legend, the indicator is labeled with
@@ -127,11 +128,15 @@ class Strategy(metaclass=ABCMeta):
         value = func(*args, **kwargs)
 
         try:
+            if isinstance(value, pd.DataFrame):
+                value = value.values.T
             value = np.asarray(value)
         except Exception:
             raise ValueError('Indicators must return array-like sequences of values')
         if value.shape[-1] != len(self._data.Close):
-            raise ValueError('Indicators must be arrays of same length as `data`')
+            raise ValueError('Indicators must be (a tuple of) arrays of same length as `data`'
+                             '(data: {}, indicator "{}": {})'.format(len(self._data.Close),
+                                                                     name, value.shape))
 
         if plot and overlay is None:
             x = value / self._data.Close
@@ -241,12 +246,12 @@ class Strategy(metaclass=ABCMeta):
         return self._data
 
     @property
-    def position(self):
+    def position(self) -> 'Position':
         """Instance of `backtesting.backtesting.Position`."""
         return self._broker.position
 
     @property
-    def orders(self):
+    def orders(self) -> 'Orders':
         """Instance of `backtesting.backtesting.Orders`."""
         return self._broker.orders
 
@@ -401,7 +406,7 @@ class Position:
         Profit (positive) or loss (negative) of current position,
         in percent of position open price.
         """
-        return self.pl / (self.open_price * abs(self.size))
+        return self.pl / (self.open_price * abs(self.size) or 1)
 
     @property
     def is_long(self):
@@ -455,11 +460,11 @@ class _Broker:
         return '<Broker: {:.0f}{:+.1f}>'.format(self._cash, self.position.pl)
 
     def buy(self, price=None, sl=None, tp=None):
-        assert (sl or -np.inf) <= (price or self.last_close) <= (tp or np.inf), (sl, price or self.last_close, tp)  # noqa: E501
+        assert (sl or -np.inf) <= (price or self.last_close) <= (tp or np.inf), "For long orders should be: SL ({}) < BUY PRICE ({}) < TP ({})".format(sl, price or self.last_close, tp)  # noqa: E501
         self.orders._update(price, sl, tp)
 
     def sell(self, price=None, sl=None, tp=None):
-        assert (tp or -np.inf) <= (price or self.last_close) <= (sl or np.inf), (tp, price or self.last_close, sl)  # noqa: E501
+        assert (tp or -np.inf) <= (price or self.last_close) <= (sl or np.inf), "For short orders should be: TP ({}) < BUY PRICE ({}) < SL ({})".format(tp, price or self.last_close, sl)  # noqa: E501
         self.orders._update(price, sl, tp, is_long=False)
 
     def close(self):
@@ -509,6 +514,8 @@ class _Broker:
 
         self._cash += pl
         self._position = 0
+        self._position_open_price = 0
+        self._position_open_i = None
 
     @property
     def equity(self):
@@ -598,20 +605,20 @@ class Backtest:
         or a monotonic range index (i.e. a sequence of periods).
 
         `strategy` is a `backtesting.backtesting.Strategy`
-        _subclass_ (not instance).
+        _subclass_ (not an instance).
 
         `cash` is the initial cash to start with.
 
         `commission` is the commision ratio. E.g. if your broker's commission
         is 1% of trade value, set commission to `0.01`. Note, if you wish to
-        account for bid-ask spread, you approximate doing so by increasing
+        account for bid-ask spread, you cam approximate doing so by increasing
         the commission, e.g. set it to `0.0002` for commission-less forex
-        trading where average spread is roughly 0.2‰ of asking price.
+        trading where the average spread is roughly 0.2‰ of asking price.
 
         `margin` is the required margin (ratio) of a leveraged account.
         No difference is made between initial and maintenance margins.
-        To run the backtest using e.g. 50:1 leverge your broker allows,
-        set margin to `0.02`.
+        To run the backtest using e.g. 50:1 leverge that your broker allows,
+        set margin to `0.02` (1 / leverage).
 
         If `trade_on_close` is `True`, market orders will be executed
         with respect to the current bar's closing price instead of the
@@ -682,7 +689,7 @@ class Backtest:
 
         # Skip first few candles where indicators are still "warming up"
         # +1 to have at least two entries available
-        start = 1 + max((np.isnan(indicator).argmin()
+        start = 1 + max((np.isnan(indicator.astype(float)).argmin()
                          for _, indicator in indicator_attrs), default=0)
 
         # Disable "invalid value encountered in ..." warnings. Comparison
@@ -732,7 +739,8 @@ class Backtest:
         If `return_heatmap` is `True`, besides returning the result
         series, an additional `pd.Series` is returned with a multiindex
         of all admissible parameter combinations, which can be further
-        inspected or projected onto 2D to plot a heatmap.
+        inspected or projected onto 2D to plot a heatmap
+        (see `backtesting.backtesting.lib.plot_heatmaps()`).
 
         Additional keyword arguments represent strategy arguments with
         list-like collections of possible values. For example, the following
@@ -807,11 +815,22 @@ class Backtest:
             for i in range(0, len(seq), n):
                 yield seq[i:i + n]
 
-        with ProcessPoolExecutor() as executor:
-            futures = [executor.submit(self._mp_task, params)
-                       for params in _batch(param_combos)]
-            for future in _tqdm(as_completed(futures), total=len(futures)):
-                for params, stats in future.result():
+        # If multiprocessing start method is 'fork' (i.e. on POSIX), use
+        # a pool of processes to compute results in parallel.
+        # Otherwise (i.e. on Windos), sequential computation will be "faster".
+        if mp.get_start_method(allow_none=False) == 'fork':
+            with ProcessPoolExecutor() as executor:
+                futures = [executor.submit(self._mp_task, params)
+                           for params in _batch(param_combos)]
+                for future in _tqdm(as_completed(futures), total=len(futures)):
+                    for params, stats in future.result():
+                        heatmap[tuple(params.values())] = maximize(stats)
+        else:
+            if os.name == 'posix':
+                warnings.warn("For multiprocessing support in `Backtest.optimize()` "
+                              "set multiprocessing start method to 'fork'.")
+            for params in _tqdm(param_combos):
+                for _, stats in self._mp_task([params]):
                     heatmap[tuple(params.values())] = maximize(stats)
 
         best_params = heatmap.idxmax()
@@ -868,53 +887,48 @@ class Backtest:
         df.index = data.index
 
         def _round_timedelta(value, _period=_data_period(df)):
-            return value.ceil(_period.resolution) if isinstance(value, pd.Timedelta) else value
+            if not isinstance(value, pd.Timedelta):
+                return value
+            resolution = getattr(_period, 'resolution_string', None) or _period.resolution
+            return value.ceil(resolution)
 
         s = pd.Series()
-        s['Start'] = df.index[0]
-        s['End'] = df.index[-1]
-        # Assigning Timedeltas needs the key to exist beforehand,
-        # otherwise the value is interpreted as nanosec *int*. See:
-        # https://github.com/pandas-dev/pandas/issues/22717
-        s['Duration'] = 0
-        s['Duration'] = s.End - s.Start
+        s.loc['Start'] = df.index[0]
+        s.loc['End'] = df.index[-1]
+        s.loc['Duration'] = s.End - s.Start
         exits = df['Exit Entry']  # After reindexed
         durations = (exits.dropna().index - df.index[exits.dropna().values.astype(int)]).to_series()
-        s['Exposure [%]'] = np.nan_to_num(durations.sum() / (s['Duration'] or np.nan) * 100)
-        s['Equity Final [$]'] = equity[-1]
-        s['Equity Peak [$]'] = equity.max()
-        s['Return [%]'] = (equity[-1] - equity[0]) / equity[0] * 100
+        s.loc['Exposure [%]'] = np.nan_to_num(durations.sum() / (s.loc['Duration'] or np.nan) * 100)
+        s.loc['Equity Final [$]'] = equity[-1]
+        s.loc['Equity Peak [$]'] = equity.max()
+        s.loc['Return [%]'] = (equity[-1] - equity[0]) / equity[0] * 100
         c = data.Close.values
-        s['Buy & Hold Return [%]'] = abs(c[-1] - c[0]) / c[0] * 100  # long OR short
-        s['Max. Drawdown [%]'] = max_dd = -np.nan_to_num(dd.max()) * 100
-        s['Avg. Drawdown [%]'] = -dd_peaks.mean() * 100
-        s['Max. Drawdown Duration'] = 0
-        s['Max. Drawdown Duration'] = _round_timedelta(dd_dur.max())
-        s['Avg. Drawdown Duration'] = 0
-        s['Avg. Drawdown Duration'] = _round_timedelta(dd_dur.mean())
-        s['# Trades'] = n_trades = pl.count()
-        s['Win Rate [%]'] = win_rate = np.nan if not n_trades else (pl > 0).sum() / n_trades * 100
-        s['Best Trade [%]'] = returns.max() * 100
-        s['Worst Trade [%]'] = returns.min() * 100
+        s.loc['Buy & Hold Return [%]'] = abs(c[-1] - c[0]) / c[0] * 100  # long OR short
+        s.loc['Max. Drawdown [%]'] = max_dd = -np.nan_to_num(dd.max()) * 100
+        s.loc['Avg. Drawdown [%]'] = -dd_peaks.mean() * 100
+        s.loc['Max. Drawdown Duration'] = _round_timedelta(dd_dur.max())
+        s.loc['Avg. Drawdown Duration'] = _round_timedelta(dd_dur.mean())
+        s.loc['# Trades'] = n_trades = pl.count()
+        s.loc['Win Rate [%]'] = win_rate = np.nan if not n_trades else (pl > 0).sum() / n_trades * 100  # noqa: E501
+        s.loc['Best Trade [%]'] = returns.max() * 100
+        s.loc['Worst Trade [%]'] = returns.min() * 100
         mean_return = returns.mean()
-        s['Avg. Trade [%]'] = mean_return * 100
-        s['Max. Trade Duration'] = 0
-        s['Max. Trade Duration'] = _round_timedelta(durations.max())
-        s['Avg. Trade Duration'] = 0
-        s['Avg. Trade Duration'] = _round_timedelta(durations.mean())
-        s['Expectancy [%]'] = ((returns[returns > 0].mean() * win_rate -
-                                returns[returns < 0].mean() * (100 - win_rate)))
+        s.loc['Avg. Trade [%]'] = mean_return * 100
+        s.loc['Max. Trade Duration'] = _round_timedelta(durations.max())
+        s.loc['Avg. Trade Duration'] = _round_timedelta(durations.mean())
+        s.loc['Expectancy [%]'] = ((returns[returns > 0].mean() * win_rate -
+                                    returns[returns < 0].mean() * (100 - win_rate)))
         pl = pl.dropna()
-        s['SQN'] = np.sqrt(n_trades) * pl.mean() / pl.std()
-        s['Sharpe Ratio'] = mean_return / (returns.std() or np.nan)
-        s['Sortino Ratio'] = mean_return / (returns[returns < 0].std() or np.nan)
-        s['Calmar Ratio'] = mean_return / ((-max_dd / 100) or np.nan)
+        s.loc['SQN'] = np.sqrt(n_trades) * pl.mean() / pl.std()
+        s.loc['Sharpe Ratio'] = mean_return / (returns.std() or np.nan)
+        s.loc['Sortino Ratio'] = mean_return / (returns[returns < 0].std() or np.nan)
+        s.loc['Calmar Ratio'] = mean_return / ((-max_dd / 100) or np.nan)
 
-        s['_strategy'] = strategy
+        s.loc['_strategy'] = strategy
         s._trade_data = df  # Private API
         return s
 
-    def plot(self, *, results: pd.Series = None, filename=None, plot_width=1200,
+    def plot(self, *, results: pd.Series = None, filename=None, plot_width=None,
              plot_equity=True, plot_pl=True,
              plot_volume=True, plot_drawdown=False,
              smooth_equity=False, relative_equity=True,
@@ -923,7 +937,7 @@ class Backtest:
         """
         Plot the progression of the last backtest run.
 
-        If `results` is proided, it should be a particular result
+        If `results` is provided, it should be a particular result
         `pd.Series` such as returned by
         `backtesting.backtesting.Backtest.run` or
         `backtesting.backtesting.Backtest.optimize`, otherwise the last
@@ -933,10 +947,9 @@ class Backtest:
         By default, a strategy/parameter-dependent file is created in the
         current working directory.
 
-        `plot_width` is the width of the plot in pixels. The height is
+        `plot_width` is the width of the plot in pixels. If None (default),
+        the plot is made to span 100% of browser width. The height is
         currently non-adjustable.
-
-        .. TODO:: Make Bokeh plot span 100% browser width by default.
 
         If `plot_equity` is `True`, the resulting plot will contain
         an equity (cash plus assets) graph section.

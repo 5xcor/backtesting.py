@@ -32,13 +32,13 @@ if __name__ == '__main__':
         install_requires=[
             'typing ; python_version < "3.5"',
             'numpy',
-            'pandas >= 0.21.0',
-            'bokeh >= 0.12.15',
+            'pandas >= 0.25.0, != 0.25.0',
+            'bokeh >= 1.1.0',
         ],
         extras_require={
             'doc': [
                 'pdoc3',
-                'jupytext >= 1.0.2',
+                'jupytext >= 1.3',
                 'nbconvert',
                 'ipykernel',       # for nbconvert
                 'jupyter_client',  # for nbconvert
@@ -63,7 +63,7 @@ if __name__ == '__main__':
             'Topic :: Office/Business :: Financial :: Investment',
             'Topic :: Scientific/Engineering :: Visualization',
         ],
-        keywords=(
+        keywords=[
             'algo',
             'algorithmic',
             'ashi',
@@ -72,7 +72,7 @@ if __name__ == '__main__':
             'bitcoin',
             'bokeh',
             'bonds',
-            'candles',
+            'candle',
             'candlestick',
             'cboe',
             'chart',
@@ -81,12 +81,15 @@ if __name__ == '__main__':
             'crash',
             'crypto',
             'currency',
+            'doji',
             'drawdown',
             'equity',
+            'etf',
             'ethereum',
             'exchange',
             'finance',
             'financial',
+            'forecast',
             'forex',
             'fund',
             'futures',
@@ -107,9 +110,11 @@ if __name__ == '__main__':
             'ohlc',
             'ohlcv',
             'order',
+            'price',
             'profit',
             'quant',
             'quantitative',
+            'rsi',
             'silver',
             'stocks',
             'strategy',
@@ -118,5 +123,5 @@ if __name__ == '__main__':
             'trading',
             'tradingview',
             'usd',
-        ),
+        ],
     )

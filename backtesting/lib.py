@@ -197,9 +197,10 @@ def resample_apply(rule: str,
                 self.sma = self.I(SMA, daily, 10, plot=False)
 
     """
-    if not isinstance(series, pd.Series):
+    if not isinstance(series, (pd.Series, pd.DataFrame)):
         assert isinstance(series, _Array), \
-            'resample_apply() takes either a `pd.Series` or a `Strategy.data.*` array'
+            'resample_apply() takes either a `pd.Series`, `pd.DataFrame`, ' \
+            'or a `Strategy.data.*` array'
         series = series.to_series()
 
     resampled = series.resample(rule, label='right').agg('last').dropna()
@@ -220,8 +221,10 @@ def resample_apply(rule: str,
 
     # Resample back to data index
     def wrap_func(resampled, *args, **kwargs):
-        ind = func(resampled, *args, **kwargs)
-        ind = ind.reindex(index=series.index | ind.index,
+        ind = pd.Series(np.asarray(func(resampled, *args, **kwargs)),
+                        index=resampled.index,
+                        name=resampled.name)
+        ind = ind.reindex(index=series.index | resampled.index,
                           method='ffill').reindex(series.index)
         return ind
 
